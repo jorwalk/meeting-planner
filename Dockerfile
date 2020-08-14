@@ -1,47 +1,44 @@
-FROM tozd/runit:ubuntu-bionic
+# The tag here should match the Meteor version of your app, per .meteor/release
+FROM geoffreybooth/meteor-base:1.10.2
 
-EXPOSE 3000/tcp
+RUN groupadd --gid 5000 newuser \
+    && useradd --home-dir /home/newuser --create-home --uid 5000 \
+    --gid 5000 --shell /bin/sh --skel /dev/null newuser
 
-ENV ROOT_URL http://example.com
-ENV MAIL_URL smtp://user:password@mailhost:port/
-ENV METEOR_SETTINGS {}
-ENV PORT 3000
-ENV MONGO_URL mongodb://mongodb/meteor
-ENV MONGO_OPLOG_URL mongodb://mongodb/local
-ENV HOME /
-ENV LOG_TO_STDOUT 0
-ENV METEOR_NO_RELEASE_CHECK 1
 
-ARG METEOR_VERSION
+# Copy app package.json and package-lock.json into container
+COPY package*.json $APP_SOURCE_FOLDER/
+RUN chown newuser /opt/src
+RUN mkdir /opt/src/.meteor && mkdir /opt/src/.meteor/local && chown newuser /opt/src/.meteor/local
+RUN mkdir /opt/bundle && chown newuser /opt/bundle
+RUN chown newuser /docker/build-meteor-bundle.sh
+USER newuser
+RUN bash $SCRIPTS_FOLDER/build-app-npm-dependencies.sh
 
-VOLUME /var/log/meteor
+# Copy app source into container
+COPY . $APP_SOURCE_FOLDER/
+RUN bash $SCRIPTS_FOLDER/build-meteor-bundle.sh
 
-COPY ./etc /etc
 
-RUN apt-get update -q -q && \
- apt-get --yes --force-yes install curl python build-essential git && \
- export METEOR_ALLOW_SUPERUSER=true && \
- curl https://install.meteor.com/${METEOR_VERSION:+?release=${METEOR_VERSION}} | sed s/--progress-bar/-sL/g | sh && \
- apt-get --yes --force-yes purge curl && \
- apt-get --yes --force-yes autoremove && \
- adduser --system --group meteor --home / && \
- export "NODE=$(find /.meteor/ -path '*bin/node' | grep '/.meteor/packages/meteor-tool/' | sort | head -n 1)" && \
- ln -sf ${NODE} /usr/local/bin/node && \
- ln -sf "$(dirname "$NODE")/npm" /usr/local/bin/npm && \
- echo "export NODE_PATH=\"$(dirname $(dirname "$NODE"))/lib/node_modules\"" >> /etc/service/meteor/run.env && \
- apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* ~/.cache ~/.npm
+# Use the specific version of Node expected by your Meteor release, per https://docs.meteor.com/changelog.html; this is expected for Meteor 1.10.2
+FROM node:12.16.1-alpine
+ENV APP_BUNDLE_FOLDER /opt/bundle
+ENV SCRIPTS_FOLDER /docker
 
-ONBUILD COPY . /source
-ONBUILD RUN export METEOR_ALLOW_SUPERUSER=true && \
- rm -rf /source/.meteor/local /source/node_modules && \
- if [ -x /source/docker-source.sh ]; then /source/docker-source.sh; fi && \
- cp -a /source /build && \
- rm -rf /source && \
- cd /build && \
- meteor list && \
- if [ -f package.json ]; then meteor npm install --production --unsafe-perm; fi && \
- meteor build --headless --directory / && \
- cd / && \
- rm -rf /build && \
- if [ -e /bundle/programs/server/package.json ]; then cd /bundle/programs/server; npm install --unsafe-perm; fi && \
- apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* ~/.cache ~/.npm
+# Runtime dependencies; if your dependencies need compilation (native modules such as bcrypt) or you are using Meteor <1.8.1, use app-with-native-dependencies.dockerfile instead
+RUN apk --no-cache add \
+    bash \
+    ca-certificates
+
+# Copy in entrypoint
+COPY --from=0 $SCRIPTS_FOLDER $SCRIPTS_FOLDER/
+
+# Copy in app bundle
+COPY --from=0 $APP_BUNDLE_FOLDER/bundle $APP_BUNDLE_FOLDER/bundle/
+
+RUN bash $SCRIPTS_FOLDER/build-meteor-npm-dependencies.sh
+
+# Start app
+ENTRYPOINT ["/docker/entrypoint.sh"]
+
+CMD ["node", "main.js"]
